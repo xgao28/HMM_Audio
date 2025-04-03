@@ -259,5 +259,5 @@ if __name__ == "__main__":
     # Run all tests
     run_all_tests()
     
-    # Uncomment to run visual test 
+    # Comment above and uncomment below to run visual test 
     # run_visual_test()

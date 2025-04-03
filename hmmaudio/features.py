@@ -29,7 +29,7 @@ def load_audio(file_path: str) -> Tuple[np.ndarray, int]:
         audio = np.mean(audio, axis=1)
     
     # Normalize audio data
-    audio = audio / np.max(np.abs(audio))
+    audio = audio / np.max(np.abs(audio)) if np.max(np.abs(audio)) > 0 else audio
         
     return audio, sample_rate
 
@@ -280,6 +280,7 @@ def extract_features(file_path: str,
                      include_delta2: bool = True,
                      include_energy: bool = False,
                      num_cepstral: int = 13,
+                     target_frames: Optional[int] = None,
                      **kwargs) -> Dict[str, np.ndarray]:
     """
     Extract a comprehensive set of features from an audio file.
@@ -291,18 +292,38 @@ def extract_features(file_path: str,
         include_delta2: Whether to include delta-delta (second derivative) features
         include_energy: Whether to include energy as a feature
         num_cepstral: Number of cepstral coefficients for MFCC
+        target_frames: Target number of frames for interpolation, if specified
         **kwargs: Additional arguments passed to extract_mfcc
     
     Returns:
         Dictionary containing the extracted features
     """
     signal, sample_rate = load_audio(file_path)
+    
+    frame_size = kwargs.get('frame_size', 0.025)
+    
+    # Handle target_frames if specified (adaptive frame stride)
+    if target_frames is not None:
+        total_duration = len(signal) / sample_rate
+        # Calculate adaptive frame stride to achieve target_frames
+        frame_stride = max((total_duration - frame_size) / (target_frames - 1), 0.001)
+    else:
+        frame_stride = kwargs.get('frame_stride', 0.01)
+    
+    # Create a features dictionary
     features = {}
     
     if include_mfcc:
+        # Extract MFCC with parameters
         mfcc = extract_mfcc(signal, sample_rate, num_cepstral=num_cepstral, **kwargs)
+        
+        # Adjust frame count if target_frames is specified and actual count differs
+        if target_frames is not None and mfcc.shape[0] != target_frames:
+            mfcc = interpolate_frames(mfcc, target_frames)
+        
         features['mfcc'] = mfcc
         
+        # Calculate deltas
         if include_delta:
             delta = compute_delta(mfcc)
             features['delta'] = delta
@@ -313,11 +334,50 @@ def extract_features(file_path: str,
     
     if include_energy:
         # Compute frame energy
-        frame_length = int(round(kwargs.get('frame_size', 0.025) * sample_rate))
-        frame_step = int(round(kwargs.get('frame_stride', 0.01) * sample_rate))
+        frame_length = int(round(frame_size * sample_rate))
+        frame_step = int(round(frame_stride * sample_rate))
         frames = frame_signal(signal, frame_length, frame_step)
         energy = np.sum(frames**2, axis=1)
         log_energy = np.log(energy + 1e-10)
+        
+        # Adjust energy frame count if needed
+        if target_frames is not None and len(log_energy) != target_frames:
+            log_energy = interpolate_frames(log_energy.reshape(-1, 1), target_frames).flatten()
+        
         features['energy'] = log_energy.reshape(-1, 1)
     
     return combine_features(features)
+
+
+def interpolate_frames(data: np.ndarray, target_frames: int) -> np.ndarray:
+    """
+    Interpolate feature frames to match the target number of frames.
+    Helper function for extract_features.
+    
+    Args:
+        data: Input feature array of shape (n_frames, n_features)
+        target_frames: Target number of frames
+    
+    Returns:
+        Interpolated feature array of shape (target_frames, n_features)
+    """
+    # Handle 1D arrays by reshaping
+    if len(data.shape) == 1:
+        data = data.reshape(-1, 1)
+    
+    # If data already has correct shape, return it unchanged
+    if data.shape[0] == target_frames:
+        return data
+    
+    # Use linear interpolation to get exact target frames
+    indices = np.linspace(0, data.shape[0] - 1, target_frames)
+    result = np.zeros((target_frames, data.shape[1]))
+    
+    for i in range(target_frames):
+        idx = indices[i]
+        idx_floor = int(np.floor(idx))
+        idx_ceil = min(idx_floor + 1, data.shape[0] - 1)
+        weight = idx - idx_floor
+        result[i] = (1 - weight) * data[idx_floor] + weight * data[idx_ceil]
+    
+    return result

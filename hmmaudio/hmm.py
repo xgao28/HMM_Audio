@@ -9,7 +9,8 @@ This module provides a from-scratch implementation of HMM algorithms including:
 """
 
 import numpy as np
-from typing import Tuple, List, Optional, Union
+from typing import Tuple, List, Optional, Union, Dict
+from tqdm import tqdm
 
 class HiddenMarkovModel:
     """
@@ -212,101 +213,407 @@ class HiddenMarkovModel:
             current_state = np.random.choice(self.N, p=self.A[current_state])
         return observations, states
 
-if __name__ == "__main__":
-    from hmmlearn import hmm
-    import copy
-    np.random.seed(42)
 
-    def generate_mfcc_like_data(n_frames=100, n_features=13, n_states=3):
+
+class ContinuousHMM:
+
+    """
+    Hidden Markov Model with Gaussian emissions for continuous observations.
+
+    This class implements an HMM for continuous observations using multivariate
+    Gaussian distributions for each state's emissions. Core algorithms include
+    the forward-backward algorithm, Viterbi algorithm, and Baum-Welch (EM) algorithm
+    for parameter estimation.
+
+    Attributes:
+        A (np.ndarray): Transition probability matrix of shape (N, N).
+        pi (np.ndarray): Initial state distribution of shape (N,).
+        means (np.ndarray): Mean vectors for each state, shape (N, D).
+        covariances (np.ndarray): Covariance matrices for each state, shape (N, D, D).
+        N (int): Number of hidden states.
+        D (int): Dimensionality of the observation vectors.
+    """
+
+    def __init__(self, transition_matrix: Optional[np.ndarray] = None, 
+                    means: Optional[np.ndarray] = None,
+                    covars: Optional[np.ndarray] = None, 
+                    initial_distribution: Optional[np.ndarray] = None,
+                    n_states: int = 5,
+                    n_features: int = 39,
+                    diagonal_covariance: bool = False):
         """
-        Generate synthetic MFCC-like data for testing HMM models.
+        Initialize a continuous HMM with given parameters or random initialization.
         
         Args:
-            n_frames (int): Number of frames (time steps)
-            n_features (int): Number of MFCC features per frame
-            n_states (int): Number of hidden states to simulate
-            
-        Returns:
-            tuple: (observations, states, true_trans)
-                observations: List of quantized observation indices
-                states: List of true hidden states used to generate observations
-                true_trans: True transition probability matrix used to generate states
+            transition_matrix: Matrix of shape (N, N) for state transitions. If None, initialized randomly.
+            means: Matrix of shape (N, D) for Gaussian means. If None, initialized randomly.
+            covariance: Array of shape (N, D, D) for Gaussian covariances. If None, initialized as identity matrices.
+            initial_distribution: Vector of shape (N,) for initial state probabilities. If None, initialized with bias towards first state.
+            n_states: Number of hidden states (only used if matrices are None).
+            n_features: Dimensionality of observation vectors (only used if matrices are None).
         """
-        # Define state-dependent distributions for MFCC features
-        means = np.array([
-            np.random.normal(loc=i * 5.0, scale=1.0, size=n_features) for i in range(n_states)
-        ])
+        # Store whether to use diagonal covariance matrix
+        self.diagonal_covariance = diagonal_covariance
+
+        # If parameters are provided, use them
+        if transition_matrix is not None and means is not None and covars is not None and initial_distribution is not None:
+            self.A = transition_matrix
+            self.means = means
+            self.covariances = covars 
+            self.pi = initial_distribution
+            self.N = transition_matrix.shape[0]
+            self.D = means.shape[1]
+
+        # Otherwise initialize randomly
+        else:
+            self.N = n_states
+            self.D = n_features
+            
+            # Initialize transition matrix with left-to-right bias
+            self.A = np.zeros((n_states, n_states))
+            for i in range(n_states):
+                if i < n_states - 1:
+                    self.A[i, i] = 0.7  # Stay in same state
+                    self.A[i, i+1] = 0.3  # Move to next state
+                else:
+                    self.A[i, i] = 1.0  # Last state loops to itself
+            
+            # Initialize means randomly but spaced out
+            self.means = np.zeros((n_states, n_features))
+            for i in range(n_states):
+                self.means[i] = np.random.randn(n_features) + i * np.ones(n_features)/n_states
+            
+            # Initialize covariances based on the covariance type
+            if self.diagonal_covariance:
+                # For diagonal, we just need a vector of variances for each state
+                self.covariances = np.array([np.ones(n_features) for _ in range(n_states)])
+            else:
+                # For full covariance, we need a full matrix per state
+                self.covariances = np.array([np.eye(n_features) for _ in range(n_states)])
+            
+            # Initialize initial state distribution with bias towards first state
+            self.pi = np.zeros(n_states)
+            self.pi[0] = 0.9
+            self.pi[1:] = 0.1 / (n_states - 1)
+
+    def _emission_log_prob(self, obs: np.ndarray, state: int) -> float:
+        """
+        Compute the log probability of an observation under a state's Gaussian.
+
+        Args:
+            obs (np.ndarray): Observation vector of shape (D,).
+            state (int): Index of the state.
+
+        Returns:
+            float: Log probability of the observation given the state.
+        """
+        diff = obs - self.means[state]
         
-        # Define the true transition probabilities
-        true_trans = np.full((n_states, n_states), 0.1)
-        np.fill_diagonal(true_trans, 0.7)
-        for i in range(n_states):
-            true_trans[i] /= true_trans[i].sum()  # Normalize rows to sum to 1
+        if self.diagonal_covariance:
+            # For diagonal covariance, we can use vectorized operations
+            # covars[state] is a vector of variances
+            inv_var = 1.0 / (self.covariances[state] + 1e-10)  # Add small constant to avoid division by zero
+            log_det = np.sum(np.log(self.covariances[state] + 1e-10))
+            exponent = -0.5 * np.sum(diff * diff * inv_var)
+        else:
+            # For full covariance matrix
+            inv_cov = np.linalg.inv(self.covariances[state])
+            log_det = np.log(np.linalg.det(self.covariances[state]))
+            exponent = -0.5 * np.dot(diff.T, np.dot(inv_cov, diff))
+            
+        log_prob = exponent - 0.5 * (self.D * np.log(2 * np.pi) + log_det)
+        return log_prob
+
+    def forward(self, observations: np.ndarray) -> Tuple[np.ndarray, float]:
+        """
+        Compute the forward probabilities and log likelihood using scaling.
+
+        Args:
+            observations (np.ndarray): Observation sequence of shape (T, D).
+                Should be a single 2D numpy array, not a list of arrays.
+
+        Returns:
+            Tuple[np.ndarray, float]: Forward probabilities and log likelihood.
+        """
+        if not isinstance(observations, np.ndarray) or len(observations.shape) != 2:
+            raise TypeError("Expected observations to be a 2D numpy array with shape (time_steps, features)")
+        T = observations.shape[0]
+        alpha = np.zeros((T, self.N))
+        scale_factors = np.zeros(T)
+
+        # Initialization
+        log_emission = np.array([self._emission_log_prob(observations[0], i) for i in range(self.N)])
+        alpha[0] = self.pi * np.exp(log_emission)
+        sum_alpha = np.sum(alpha[0])
+        alpha[0] /= sum_alpha
+        scale_factors[0] = sum_alpha
+
+        # Induction
+        for t in range(1, T):
+            for i in range(self.N):
+                alpha[t, i] = np.sum(alpha[t-1] * self.A[:, i]) * np.exp(
+                    self._emission_log_prob(observations[t], i))
+            sum_alpha = np.sum(alpha[t])
+            alpha[t] /= sum_alpha
+            scale_factors[t] = sum_alpha
+
+        log_likelihood = np.sum(np.log(scale_factors))
+        return alpha, log_likelihood
+
+    def backward(self, observations: np.ndarray) -> Tuple[np.ndarray, float]:
+        """
+        Compute the backward probabilities using scaling.
+
+        Args:
+            observations (np.ndarray): Observation sequence of shape (T, D).
+                Should be a single 2D numpy array, not a list of arrays.
+
+        Returns:
+            Tuple[np.ndarray, float]: Backward probabilities and log likelihood.
+        """
+        if not isinstance(observations, np.ndarray) or len(observations.shape) != 2:
+            raise TypeError("Expected observations to be a 2D numpy array with shape (time_steps, features)")
+        T = observations.shape[0]
+        beta = np.zeros((T, self.N))
+        beta[-1] = 1.0
+        scale_factors = np.zeros(T)
+        scale_factors[-1] = 1.0
+
+        for t in range(T-2, -1, -1):
+            emission_log_probs = np.array([self._emission_log_prob(observations[t+1], i) for i in range(self.N)])
+            emission_probs = np.exp(emission_log_probs)
+            beta[t] = np.sum(self.A * emission_probs * beta[t+1], axis=1)
+            sum_beta = np.sum(beta[t])
+            beta[t] /= sum_beta
+            scale_factors[t] = sum_beta
+
+        # Compute log likelihood (same as forward)
+        log_emission_0 = np.array([self._emission_log_prob(observations[0], i) for i in range(self.N)])
+        initial_probs = self.pi * np.exp(log_emission_0) * beta[0]
+        log_likelihood = np.log(np.sum(initial_probs)) + np.sum(np.log(scale_factors[1:]))
+        return beta, log_likelihood
+
+    def viterbi(self, observations: np.ndarray) -> Tuple[List[int], float]:
+        """
+        Find the most likely state sequence using the Viterbi algorithm in log space.
+
+        Args:
+            observations (np.ndarray): Observation sequence of shape (T, D).
+                Should be a single 2D numpy array, not a list of arrays.
+
+        Returns:
+            Tuple[List[int], float]: Most likely state sequence and log probability.
+        """
+        if not isinstance(observations, np.ndarray) or len(observations.shape) != 2:
+            raise TypeError("Expected observations to be a 2D numpy array with shape (time_steps, features)")
+        T = observations.shape[0]
+        log_delta = np.zeros((T, self.N))
+        psi = np.zeros((T, self.N), dtype=int)
+
+        # Initialization
+        log_pi = np.log(self.pi + 1e-12)
+        log_emission_0 = np.array([self._emission_log_prob(observations[0], i) for i in range(self.N)])
+        log_delta[0] = log_pi + log_emission_0
+
+        # Recursion
+        for t in range(1, T):
+            for i in range(self.N):
+                log_trans = np.log(self.A[:, i] + 1e-12)
+                log_prob = log_delta[t-1] + log_trans
+                psi[t, i] = np.argmax(log_prob)
+                log_delta[t, i] = log_prob[psi[t, i]] + self._emission_log_prob(observations[t], i)
+
+        # Backtracking
+        path = np.zeros(T, dtype=int)
+        path[-1] = np.argmax(log_delta[-1])
+        log_prob = log_delta[-1, path[-1]]
+
+        for t in range(T-2, -1, -1):
+            path[t] = psi[t+1, path[t+1]]
+
+        return path.tolist(), log_prob
+
+    def baum_welch(self, observations, max_iter: int = 10) -> None:
+        """
+        Estimate model parameters using the Baum-Welch algorithm.
+
+        Args:
+            observations: Either a single observation sequence as np.ndarray of shape (T, D)
+                        or a list of observation sequences, each of shape (T_i, D).
+            max_iter (int): Maximum number of iterations.
+        """
+        # Check if observations is a list of sequences or a single sequence
+        is_list = isinstance(observations, list)
+        eps = 1e-12
         
-        initial_probs = np.full(n_states, 1.0 / n_states)
+        # If it's a single numpy array, convert it to a list with one element
+        if not is_list:
+            if not isinstance(observations, np.ndarray):
+                raise TypeError("Observations must be a numpy array or a list of numpy arrays")
+            observations = [observations]
         
-        # Generate state sequence
+        # Verify that all elements are numpy arrays with the expected dimensions
+        if not all(isinstance(obs, np.ndarray) and len(obs.shape) == 2 for obs in observations):
+            raise ValueError("All observations must be 2D numpy arrays with shape (time_steps, features)")
+            
+        # Get the feature dimension from the first observation
+        D = observations[0].shape[1]
+            
+        for _ in tqdm(range(max_iter), desc="Baum-Welch Training Progress"):
+            # Accumulators for parameters
+            A_num = np.zeros((self.N, self.N))
+            A_denom = np.zeros(self.N)
+            means_num = np.zeros((self.N, D))
+            gamma_sum = np.zeros(self.N)
+            pi_sum = np.zeros(self.N)
+            # First, we need to initialize covars_num correctly depending on diagonal_covariance
+            if self.diagonal_covariance:
+                # For diagonal covariances, only accumulate diagonal elements
+                covars_num = np.zeros((self.N, D))
+            else:
+                # For full covariances, accumulate full matrices
+                covars_num = np.zeros((self.N, D, D))
+            
+            # Process each observation sequence
+            for obs in observations:
+                T = len(obs)
+                if T <= 1:  # Skip sequences that are too short
+                    continue
+                    
+                # E-step: Compute alpha, beta, gamma, xi for this sequence
+                alpha, _ = self.forward(obs)
+                beta, _ = self.backward(obs)
+
+                gamma = alpha * beta
+                gamma /= np.sum(gamma, axis=1, keepdims=True) + eps
+
+                xi = np.zeros((T-1, self.N, self.N))
+                for t in range(T-1):
+                    emission_probs = np.array([self._emission_log_prob(obs[t+1], j) for j in range(self.N)])
+                    emission_probs = np.exp(emission_probs)
+                    temp = alpha[t].reshape(-1, 1) * self.A * emission_probs.reshape(1, -1) * beta[t+1].reshape(1, -1)
+                    xi[t] = temp / (np.sum(temp) + eps)
+
+                # Accumulate statistics
+                A_num += np.sum(xi, axis=0)
+                A_denom += np.sum(gamma[:-1], axis=0)
+                pi_sum += gamma[0]
+                
+                # Accumulate for means and covariances
+                for i in range(self.N):
+                    gamma_i = gamma[:, i]
+                    gamma_sum[i] += np.sum(gamma_i)
+                    means_num[i] += np.sum(gamma_i[:, np.newaxis] * obs, axis=0)
+                    
+                    # Compute covariance contribution for this sequence
+                    for t in range(T):
+                        diff = obs[t] - self.means[i]
+                        if self.diagonal_covariance:
+                            # For diagonal covariance, just square each component
+                            covars_num[i] += gamma[t, i] * (diff * diff)
+                        else:
+                            # For full covariance, compute outer product
+                            covars_num[i] += gamma[t, i] * np.outer(diff, diff)
+            
+            # M-step: Update parameters
+            # Update transition matrix
+            new_A = A_num / (A_denom.reshape(-1, 1) + eps)
+            new_A = np.clip(new_A, 1e-12, 1.0)
+            new_A /= new_A.sum(axis=1, keepdims=True)
+
+            # Update initial distribution
+            new_pi = pi_sum + eps
+            new_pi /= new_pi.sum()
+
+            # Update means and covariances
+            new_means = np.zeros_like(self.means)
+            new_covs = np.zeros_like(self.covariances)
+            for i in range(self.N):
+                if gamma_sum[i] < eps:
+                    new_means[i] = self.means[i]
+                    new_covs[i] = self.covariances[i]
+                    continue
+                    
+                new_means[i] = means_num[i] / gamma_sum[i]
+                new_covs[i] = covars_num[i] / gamma_sum[i]
+                
+                # Apply regularization based on covariance type
+                if self.diagonal_covariance:
+                    # Add a small constant to diagonal variances
+                    new_covs[i] += 1e-12
+                else:
+                    # Add a small constant to diagonal of covariance matrix
+                    new_covs[i] += np.eye(D) * 1e-12
+
+            # Update parameters
+            self.A = new_A
+            self.pi = new_pi
+            self.means = new_means
+            self.covariances = new_covs
+
+    def fit(self, observations, max_iter: int = 10) -> None:
+        self.baum_welch(observations, max_iter)
+        
+    def score(self, observations) -> float:
+        """
+        Calculate the log-likelihood of observation(s) under the model.
+        
+        Args:
+            observations: Either a single observation sequence as np.ndarray of shape (T, D)
+                        or a list of observation sequences, each of shape (T_i, D).
+        
+        Returns:
+            float: Log-likelihood of the observation(s) under the model.
+        """
+        # Check if observations is a list or a single sequence
+        is_list = isinstance(observations, list)
+        if not is_list:
+            if not isinstance(observations, np.ndarray):
+                raise TypeError("Observations must be a numpy array or a list of numpy arrays")
+            observations = [observations]
+        
+        # Verify that all elements are numpy arrays with the expected dimensions
+        if not all(isinstance(obs, np.ndarray) and len(obs.shape) == 2 for obs in observations):
+            raise ValueError("All observations must be 2D numpy arrays with shape (time_steps, features)")
+        
+        # Calculate the log-likelihood for each sequence and sum them
+        total_log_likelihood = 0.0
+        for obs in observations:
+            _, log_likelihood = self.forward(obs)
+            total_log_likelihood += log_likelihood
+        
+        return total_log_likelihood
+
+    def generate_sequence(self, length: int) -> Tuple[np.ndarray, List[int]]:
+        """
+        Generate a state and observation sequence from the model.
+
+        Args:
+            length (int): Length of the sequence to generate.
+
+        Returns:
+            Tuple[np.ndarray, List[int]]: Observations (shape (length, D)) and state sequence.
+        """
+        observations = []
         states = []
-        current_state = np.random.choice(n_states, p=initial_probs)
-        states.append(current_state)
-        
-        for t in range(1, n_frames):
-            current_state = np.random.choice(n_states, p=true_trans[current_state])
+        current_state = np.random.choice(self.N, p=self.pi)
+        for _ in range(length):
             states.append(current_state)
-        
-        # Generate MFCC features based on states
-        raw_features = np.array([means[state] + np.random.normal(0, 1, n_features) for state in states])
-        
-        # Quantize features into discrete symbols (e.g., VQ codebook)
-        # For simplicity, we'll just quantize each feature into 5 possible values
-        num_symbols = 5
-        min_val, max_val = raw_features.min(), raw_features.max()
-        bins = np.linspace(min_val, max_val, num_symbols + 1)
-        
-        # For simplicity, we'll use only the first MFCC coefficient for quantization
-        quantized = np.digitize(raw_features[:, 0], bins[1:-1])
-        
-        return quantized.tolist(), states, true_trans
-
-    # Generate MFCC-like data
-    n_states = 8
-    n_symbols = 5
-    observations, true_states, true_trans = generate_mfcc_like_data(n_frames=1000, n_states=n_states)
-
-    # Initialize models with wrong parameters
-    init_trans = np.full((n_states, n_states), 1/n_states)
-    init_emission = np.full((n_states, n_symbols), 1/n_symbols)
-    init_start = np.full(n_states, 1/n_states)
-
-    # Our HMM
-    our_hmm = HiddenMarkovModel(copy.deepcopy(init_trans), 
-                               copy.deepcopy(init_emission),
-                               copy.deepcopy(init_start))
-    our_hmm.fit(observations, max_iter=100)
-
-
-
-
-
-    # hmmlearn model
-    hmm_model = hmm.CategoricalHMM(n_components=n_states, n_iter=100,
-                                  init_params='', params='ste')
-    hmm_model.startprob_ = copy.deepcopy(init_start)
-    hmm_model.transmat_ = copy.deepcopy(init_trans)
-    hmm_model.emissionprob_ = copy.deepcopy(init_emission)
-    hmm_model.fit(np.array(observations).reshape(-1, 1))
-
-    # Results comparison
-    print("True Transition:\n", true_trans)
-    print("\nOur Learned Transition:\n", np.round(our_hmm.A, 2))
-    print("hmmlearn Transition:\n", np.round(hmm_model.transmat_, 2))
-
-    print("\nOur Learned Emission:\n", np.round(our_hmm.B, 2))
-    print("hmmlearn Emission:\n", np.round(hmm_model.emissionprob_, 2))
-
-    # Verify similarity
-    assert np.allclose(our_hmm.A, hmm_model.transmat_, atol=0.15), \
-        "Transition matrices diverged"
-    assert np.allclose(our_hmm.B, hmm_model.emissionprob_, atol=0.15), \
-        "Emission matrices diverged"
-    print("\nMFCC validation passed! Both implementations show similar behavior.")
+            
+            if self.diagonal_covariance:
+                # For diagonal covariance, create a diagonal matrix from the variance vector
+                diag_cov = np.diag(self.covariances[current_state])
+                obs = np.random.multivariate_normal(
+                    self.means[current_state],
+                    diag_cov
+                )
+            else:
+                # For full covariance
+                obs = np.random.multivariate_normal(
+                    self.means[current_state],
+                    self.covariances[current_state]
+                )
+                
+            observations.append(obs)
+            current_state = np.random.choice(self.N, p=self.A[current_state])
+        return np.array(observations), states
