@@ -459,7 +459,9 @@ class ContinuousHMM:
         # Get the feature dimension from the first observation
         D = observations[0].shape[1]
             
-        for _ in tqdm(range(max_iter), desc="Baum-Welch Training Progress"):
+        for i in range(max_iter):
+            print(f"Iteration {i+1}/{max_iter}")
+            
             # Accumulators for parameters
             A_num = np.zeros((self.N, self.N))
             A_denom = np.zeros(self.N)
@@ -475,7 +477,7 @@ class ContinuousHMM:
                 covars_num = np.zeros((self.N, D, D))
             
             # Process each observation sequence
-            for obs in observations:
+            for obs in tqdm(observations, desc="Baum-Welch Training Progress"):
                 T = len(obs)
                 if T <= 1:  # Skip sequences that are too short
                     continue

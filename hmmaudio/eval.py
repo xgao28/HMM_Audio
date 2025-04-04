@@ -4,14 +4,13 @@ import numpy as np
 from sklearn.metrics import accuracy_score, confusion_matrix
 
 
-def evaluate_models(models, features_dict, files_dict, normalize_by_length=True):
+def evaluate_models(models, features_dict, normalize_by_length=True):
     """
     Evaluate the HMM models (discrete or continuous) on the given dataset and compute accuracy.
     
     Args:
         models: Dictionary of trained HMM models for each emotion
         features_dict: Dictionary of feature sequences for each emotion
-        files_dict: Dictionary of file names for each emotion
         normalize_by_length: Whether to normalize log probabilities by sequence length (default: True)
         
     Returns:
@@ -21,9 +20,10 @@ def evaluate_models(models, features_dict, files_dict, normalize_by_length=True)
         true_labels: List of true emotion labels
         pred_labels: List of predicted emotion labels
     """
+    print("Evaluating HMMs...")
+
     true_labels = []
     pred_labels = []
-    all_files = []
     predictions = {}
     all_scores = []
     
@@ -31,7 +31,7 @@ def evaluate_models(models, features_dict, files_dict, normalize_by_length=True)
         emotion_preds = []
         emotion_scores = []
         
-        for i, feature_seq in enumerate(tqdm(features_dict[true_emotion], desc=f"Evaluating {true_emotion}")):
+        for feature_seq in tqdm(features_dict[true_emotion], desc=f"Evaluating {true_emotion}"):
             # Calculate log probability for each emotion model
             log_probs = {}
             for emotion, model in models.items():
@@ -51,7 +51,6 @@ def evaluate_models(models, features_dict, files_dict, normalize_by_length=True)
             
             true_labels.append(true_emotion)
             pred_labels.append(pred_emotion)
-            all_files.append(files_dict[true_emotion][i])
             emotion_preds.append(pred_emotion)
             emotion_scores.append(log_probs)
         
@@ -61,5 +60,7 @@ def evaluate_models(models, features_dict, files_dict, normalize_by_length=True)
     # Calculate accuracy and confusion matrix
     accuracy = accuracy_score(true_labels, pred_labels)
     cm = confusion_matrix(true_labels, pred_labels, labels=list(models.keys()))
+
+    print("Evaluation complete.")
     
     return accuracy, cm, predictions, true_labels, pred_labels

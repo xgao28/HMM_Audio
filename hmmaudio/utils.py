@@ -5,12 +5,7 @@ from hmmaudio.features import extract_features
 from hmmaudio.hmm import HiddenMarkovModel, ContinuousHMM
 
 
-def load_data(data_path, label, limit=None,                 
-                include_mfcc=True,
-                include_delta=True,
-                include_delta2=True,
-                num_cepstral=13,
-                target_frames = None):
+def load_data(data_path, label, limit=None, **kwargs):
     """Load audio files for a specific label and extract features."""
     label_path = os.path.join(data_path, label)
     audio_files = [f for f in os.listdir(label_path) if f.endswith('.wav')]
@@ -25,14 +20,7 @@ def load_data(data_path, label, limit=None,
         file_path = os.path.join(label_path, audio_file)
         try:
             # Extract MFCC features with delta and delta-delta
-            features = extract_features(
-                file_path,
-                include_mfcc=include_mfcc,
-                include_delta=include_delta,
-                include_delta2=include_delta2,
-                num_cepstral=num_cepstral,
-                target_frames=target_frames
-            )
+            features = extract_features(file_path, **kwargs)
             features_list.append(features)
             file_names.append(audio_file)
         except Exception as e:
@@ -40,22 +28,14 @@ def load_data(data_path, label, limit=None,
     
     return features_list, file_names
 
-def load_all_data(data_path, limit=None,                 
-                include_mfcc=True,
-                include_delta=True,
-                include_delta2=True,
-                num_cepstral=13, target_frames=None):
+def load_all_data(data_path, limit=None, **kwargs):
     """Load all audio files from the data path and extract features."""
     label_features = {}
     label_files = {}
     labels = [f for f in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, f))]
 
     for label in labels:
-        features_list, file_names = load_data(data_path, label,                 
-                include_mfcc=include_mfcc,
-                include_delta=include_delta,
-                include_delta2=include_delta2,
-                num_cepstral=num_cepstral, target_frames=target_frames)
+        features_list, file_names = load_data(data_path, label, limit=limit, **kwargs)
         label_features[label] = features_list
         label_files[label] = file_names
         print(f"{label}: Loaded {len(features_list)} files")
@@ -96,7 +76,7 @@ def train_hmm(label_features, n_states, n_symbols, max_iter=100, continuous=True
         print(f"Training HMM for {label}")
         if continuous:
             # Use Continuous HMM for continuous features
-            hmm = ContinuousHMM(n_states, n_symbols, diagonal_covariance=diagonal_covariance)
+            hmm = ContinuousHMM(n_states=n_states, n_features=n_symbols, diagonal_covariance=diagonal_covariance)
         else:
             hmm = initialize_hmm(n_states, n_symbols)
         hmm.fit(features, max_iter=max_iter)
